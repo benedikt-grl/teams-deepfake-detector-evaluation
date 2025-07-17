@@ -1,20 +1,24 @@
 import os
 import av
 import argparse
-import pandas as pd
 from tqdm import tqdm
-from data.split_utils import is_blank_frame, try_read_qr_code, open_output_writer
 from utils.files import find_files_recursively
 from utils.logger import setup_basic_logger
+from threading import Thread, Lock
+from data.split_utils import is_blank_frame, try_read_qr_code, open_output_writer
 
 
 log = setup_basic_logger(os.path.basename(__file__))
 
 
-def split_fragments(
+def worker(
+    worker_name: str,
     fragments_filepaths: list[str],
     output_dir: str,
-):
+    shared_set: set[str],
+    lock: Lock,
+    pbar: tqdm) -> None:
+
     current_item_id = None
     current_modifiers = None
 
@@ -24,9 +28,7 @@ def split_fragments(
     output_stream = None
     current_start_pts = None
 
-    buffer = []
-
-    for fragment_filepath in tqdm(fragments_filepaths, desc="Processing fragments", unit="fragment"):
+    for fragment_filepath in tqdm(fragments_filepaths, desc=f"[{worker_name}] Processing fragments", unit="fragment"):
 
         # Open the video file
         with av.open(fragment_filepath) as input_container:
@@ -61,6 +63,17 @@ def split_fragments(
                     current_item_id = metadata["item_id"]
                     current_modifiers = metadata["modifiers"]
 
+                    # Check the set
+                    video_id = f"{fragment_filepath}_{current_item_id}_{current_modifiers}"
+                    with lock:
+                        if video_id in shared_set:
+                            # Another thread already started processing that video. This thread's job is done.
+                            return
+
+                        else:
+                            shared_set.add(video_id)
+                            pbar.update(1)
+
                     # Continue to next frame
                     continue
 
@@ -69,7 +82,7 @@ def split_fragments(
 
                     # If we don't have any metadata yet, we will have to skip this frame
                     if current_item_id is None:
-                        log.info(f"Need to skip frame {frame_idx} because we haven't seen a metadata frame yet.")
+                        # log.info(f"[{worker_name}] Need to skip frame {frame_idx} because we haven't seen a metadata frame yet.")
                         continue
 
                     # First frame of a new sequence
@@ -80,13 +93,7 @@ def split_fragments(
                         output_container, output_stream = open_output_writer(output_filepath, input_stream)
                         is_recording = True
                         current_start_pts = input_frame.pts
-                        log.info(f"Starting new clip (item id: {current_item_id}, modifiers: {current_modifiers}).")
-
-                        buffer.append({
-                            "item_id": current_item_id,
-                            "modifiers": current_modifiers,
-                            "filename": output_filename,
-                        })
+                        log.info(f"[Thread {worker_name}] Starting new clip (item id: {current_item_id}, modifiers: {current_modifiers}).")
 
                     # Create a new frame with the pixel values of the input frame
                     output_frame = av.VideoFrame.from_ndarray(input_frame.to_ndarray(), format=input_frame.format.name)
@@ -103,7 +110,7 @@ def split_fragments(
                             output_container.mux(packet)
 
                     except Exception as e:
-                        log.exception(f"Error encoding frame {frame_idx} in {output_filepath}: {e}")
+                        log.exception(f"[Thread {worker_name}] Error encoding frame {frame_idx} in {output_filepath}: {e}")
                         raise e
 
     # Close the last output file
@@ -115,25 +122,34 @@ def split_fragments(
 
         output_container.close()
 
-    output_df = pd.DataFrame(buffer)
-    return output_df
-
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Annotate recorded frames")
-    parser.add_argument("--input_dir", type=str, help="Directory where to search for fragments", default="/media/bene/getreal/video-streaming-linux/recordings/27005680-3421-436a-bdc1-06fecc993edd")
+    parser.add_argument("--input_dir", type=str, help="Directory where to search for fragments", default="/tmp/66e4fbe5-7170-4d61-8585-90137782784a")
     parser.add_argument("--output_dir", type=str, help="Directory where to save the output fragments", default="/tmp")
+    parser.add_argument("--num_workers", type=int, help="Number of workers", default=8)
     args = vars(parser.parse_args())
 
     fragments_filepaths = sorted(list(find_files_recursively(args["input_dir"], file_extensions=[".mkv"])))
 
-    # fragments_attributes_df = extract_video_attributes(fragments_filepaths)
-    # assert len(fragments_attributes_df["width"].unique()) == 1 and len(fragments_attributes_df["height"].unique()) == 1, "Expected all fragments to have the same width and height"
+    shared_set: set[str] = set()
+    lock = Lock()
 
-    output_videos_df = split_fragments(fragments_filepaths=fragments_filepaths, output_dir=args["output_dir"])
-    log.info(f"Stored individual videos to \"{args['output_dir']}\"")
+    with tqdm(total=400, desc="Video clips") as pbar:
+        threads: list[Thread] = []
 
-    output_csv_filepath = os.path.join(args["output_dir"], "video_clips.csv")
-    output_videos_df.to_csv(output_csv_filepath, index=False)
+        for i in range(args["num_workers"]):
+            offset = len(fragments_filepaths) // args["num_workers"] * i
+            worker_fragments = fragments_filepaths[offset:]
+            t = Thread(
+                target=worker,
+                args=(str(i), worker_fragments, args["output_dir"], shared_set, lock, pbar)
+            )
+            t.start()
+            threads.append(t)
 
+        # Wait for all workers to finish
+        for t in threads:
+            t.join()
+
+    print(f"Length of final set: {len(shared_set)}")
