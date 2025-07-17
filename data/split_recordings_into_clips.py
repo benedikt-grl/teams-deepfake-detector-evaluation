@@ -45,18 +45,22 @@ def is_color_frame(img, blank_color=BLANK_BLACK_COLOR):
 
 
 def try_read_qr_code(img: np.ndarray):
-    decoded_qr_code = decode(img)
+    try:
+        decoded_qr_code = decode(img)
 
-    if len(decoded_qr_code) == 0:
+        if len(decoded_qr_code) == 0:
+            return None
+        elif len(decoded_qr_code) > 1:
+            log.warning("Found more than 1 QR code in the given image. Using the first QR code.")
+
+        decoded_data = decoded_qr_code[0].data.decode("ascii")
+
+        # Parse to dict
+        # Note that eval can be dangerous
+        return ast.literal_eval(decoded_data)
+    except Exception as e:
+        log.error(f"Error reading QR code: {e}")
         return None
-    elif len(decoded_qr_code) > 1:
-        log.warning("Found more than 1 QR code in the given image. Using the first QR code.")
-
-    decoded_data = decoded_qr_code[0].data.decode("ascii")
-
-    # Parse to dict
-    # Note that eval can be dangerous
-    return ast.literal_eval(decoded_data)
 
 
 def open_output_writer(filename: str, template_stream: av.video.stream.VideoStream) -> tuple[av.container.OutputContainer, av.video.stream.VideoStream]:
@@ -117,7 +121,7 @@ def split_fragments(
                 # Check if the frame is a separator frame
                 metadata = try_read_qr_code(frame_rgb)
 
-                if metadata is not None and isinstance(metadata, dict):
+                if metadata is not None and isinstance(metadata, dict) and "item_id" in metadata:
                     # It is a metadata frame
 
                     # If we are currently recording, stop the recording
