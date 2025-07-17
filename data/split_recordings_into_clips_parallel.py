@@ -28,7 +28,7 @@ def worker(
     output_stream = None
     current_start_pts = None
 
-    for fragment_filepath in tqdm(fragments_filepaths, desc=f"[{worker_name}] Processing fragments", unit="fragment"):
+    for fragment_filepath in tqdm(fragments_filepaths, desc=f"[{worker_name}] Processing fragments", unit="fragment", disable=True):
 
         # Open the video file
         with av.open(fragment_filepath) as input_container:
@@ -59,6 +59,10 @@ def worker(
                         output_container.close()
                         is_recording = False
 
+                    if (current_item_id == metadata["item_id"]) and (current_modifiers == metadata["modifiers"]):
+                        # We already saw this metadata frame
+                        continue
+
                     # Decode QR code
                     current_item_id = metadata["item_id"]
                     current_modifiers = metadata["modifiers"]
@@ -68,6 +72,7 @@ def worker(
                     with lock:
                         if video_id in shared_set:
                             # Another thread already started processing that video. This thread's job is done.
+                            log.info(f"[Thread {worker_name}] Video {video_id} already processed.]")
                             return
 
                         else:
@@ -93,7 +98,7 @@ def worker(
                         output_container, output_stream = open_output_writer(output_filepath, input_stream)
                         is_recording = True
                         current_start_pts = input_frame.pts
-                        log.info(f"[Thread {worker_name}] Starting new clip (item id: {current_item_id}, modifiers: {current_modifiers}).")
+                        log.info(f"[Thread {worker_name}] Starting new clip (item id: {current_item_id}, modifiers: {current_modifiers}). Output filepath is \"{output_filepath}\".")
 
                     # Create a new frame with the pixel values of the input frame
                     output_frame = av.VideoFrame.from_ndarray(input_frame.to_ndarray(), format=input_frame.format.name)
