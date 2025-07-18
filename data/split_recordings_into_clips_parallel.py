@@ -115,8 +115,18 @@ def worker(
                             output_container.mux(packet)
 
                     except Exception as e:
-                        log.exception(f"[Thread {worker_name}] Error encoding frame {frame_idx} in {output_filepath}: {e}")
-                        raise e
+                        log.exception(f"[Thread {worker_name}] Error encoding frame {frame_idx} of fragment {fragment_filepath} to {output_filepath}: {e}")
+
+                        # Stop recording
+                        current_item_id = None
+                        current_modifiers = None
+                        is_recording = False
+
+                        # This recording is burnt
+                        if os.path.exists(output_filepath):
+                            os.remove(output_filepath)
+
+                        # Skip ahead until we find the next metadata frame
 
     # Close the last output file
     if is_recording:
